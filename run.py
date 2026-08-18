@@ -1,6 +1,7 @@
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from datetime import datetime, timezone
+import math
 
 
 db = SQLAlchemy()
@@ -102,6 +103,7 @@ def create_app(test_config=None):
     def list_expenses():
         query = Expense.query
 
+        # Existing category filter
         category = request.args.get("category")
 
         if category:
@@ -110,6 +112,7 @@ def create_app(test_config=None):
                 == category.strip().lower()
             )
 
+        # Existing amount filters
         min_amount = request.args.get("min_amount", type=float)
         max_amount = request.args.get("max_amount", type=float)
 
@@ -123,18 +126,139 @@ def create_app(test_config=None):
                 Expense.amount <= max_amount
             )
 
-        expenses = query.order_by(
+        # ---------------------------------------------------------
+        # DATE FILTERING
+        # ---------------------------------------------------------
+
+        start_date_value = request.args.get("start_date")
+        end_date_value = request.args.get("end_date")
+
+        start_date = None
+        end_date = None
+
+        if start_date_value is not None:
+            start_date = parse_date(start_date_value)
+
+            if start_date is None:
+                return jsonify({
+                    "error": "start_date must use YYYY-MM-DD format"
+                }), 400
+
+            query = query.filter(
+                Expense.expense_date >= start_date
+            )
+
+        if end_date_value is not None:
+            end_date = parse_date(end_date_value)
+
+            if end_date is None:
+                return jsonify({
+                    "error": "end_date must use YYYY-MM-DD format"
+                }), 400
+
+            query = query.filter(
+                Expense.expense_date <= end_date
+            )
+
+        # start_date cannot be after end_date
+        if (
+            start_date is not None
+            and end_date is not None
+            and start_date > end_date
+        ):
+            return jsonify({
+                "error": "start_date cannot be later than end_date"
+            }), 400
+
+        # ---------------------------------------------------------
+        # ORDERING
+        # ---------------------------------------------------------
+
+        query = query.order_by(
             Expense.expense_date.desc(),
             Expense.id.desc()
-        ).all()
+        )
 
-        return jsonify({
-            "expenses": [
-                expense.to_dict()
-                for expense in expenses
-            ],
-            "count": len(expenses)
-        })
+        # ---------------------------------------------------------
+        # PAGINATION
+        # ---------------------------------------------------------
+
+        page_value = request.args.get("page")
+        per_page_value = request.args.get("per_page")
+
+        # Pagination is requested if either parameter is present.
+        pagination_requested = (
+            page_value is not None
+            or per_page_value is not None
+        )
+
+        if pagination_requested:
+
+            # Default values
+            if page_value is None:
+                page = 1
+            else:
+                try:
+                    page = int(page_value)
+                except (TypeError, ValueError):
+                    return jsonify({
+                        "error": "page must be a positive integer"
+                    }), 400
+
+            if per_page_value is None:
+                per_page = 10
+            else:
+                try:
+                    per_page = int(per_page_value)
+                except (TypeError, ValueError):
+                    return jsonify({
+                        "error": "per_page must be a positive integer"
+                    }), 400
+
+            # Positive integer validation
+            if page <= 0:
+                return jsonify({
+                    "error": "page must be a positive integer"
+                }), 400
+
+            if per_page <= 0:
+                return jsonify({
+                    "error": "per_page must be a positive integer"
+                }), 400
+
+            # Get total AFTER applying all filters
+            total = query.count()
+
+            # Calculate total pages
+            pages = math.ceil(total / per_page)
+
+            # Calculate offset
+            offset = (page - 1) * per_page
+
+            # Apply pagination AFTER filtering
+            expenses = query.offset(offset).limit(per_page).all()
+
+            return jsonify({
+                "expenses": [
+                    expense.to_dict()
+                    for expense in expenses
+                ],
+                "page": page,
+                "per_page": per_page,
+                "total": total,
+                "pages": pages
+            })
+
+        # ---------------------------------------------------------
+        # ORIGINAL / NON-PAGINATED RESPONSE
+        # ---------------------------------------------------------
+
+        expenses = query.all()
+
+        return jsonify([
+            expense.to_dict()
+            for expense in expenses
+        ])
 
     @app.get("/expenses/<int:expense_id>")
     def get_expense(expense_id):
